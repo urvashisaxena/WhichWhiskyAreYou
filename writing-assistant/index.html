@@ -419,10 +419,108 @@
     </aside>
 </main>
 
-<footer>ClearWrite runs entirely in your browser. Your text never leaves your device — no subscription, no sign-up, no data collection.</footer>
+<footer>ClearWrite runs entirely in your browser with a built-in 370,000-word dictionary. Your text never leaves your device — no subscription, no sign-up, no data collection.</footer>
 
+<script src="dictionary.js"></script>
 <script>
 'use strict';
+
+/* =====================================================
+   Full spell-check dictionary
+   Loaded from dictionary.js (~370k words). If that file is
+   missing, spell check gracefully falls back to the
+   common-misspellings list below.
+   ===================================================== */
+
+const DICT = new Set(typeof window.CLEARWRITE_DICT === 'string' ? window.CLEARWRITE_DICT.split(' ') : []);
+const FREQ_RANK = new Map();
+if (typeof window.CLEARWRITE_FREQ === 'string') {
+    window.CLEARWRITE_FREQ.split(' ').forEach((w, i) => FREQ_RANK.set(w, i));
+}
+
+let personalDict = new Set();
+try { personalDict = new Set(JSON.parse(localStorage.getItem('clearwrite-personal-dict') || '[]')); } catch {}
+function savePersonalDict() {
+    try { localStorage.setItem('clearwrite-personal-dict', JSON.stringify([...personalDict])); } catch {}
+}
+
+// Contractions whose base form isn't a dictionary word
+const CONTRACTIONS_OK = new Set(["can't", "won't", "shan't", "ain't", "y'all", "o'clock", "ma'am", "'tis", "'twas", "ne'er", "o'er", "let's"]);
+
+function isKnownWord(word) {
+    const lower = word.toLowerCase();
+    if (DICT.has(lower) || personalDict.has(lower)) return true;
+    if (lower.includes("'")) {
+        if (CONTRACTIONS_OK.has(lower)) return true;
+        const base = lower.replace(/(n't|'s|'ll|'ve|'re|'d|'em|')$/, '');
+        return base.length > 0 && (DICT.has(base) || personalDict.has(base));
+    }
+    return false;
+}
+
+/* ---- "Did you mean?" suggestions (edit distance vs dictionary) ---- */
+
+const ALPHABET = 'abcdefghijklmnopqrstuvwxyz';
+const suggestionCache = new Map();
+
+function edits1(word) {
+    const res = new Set();
+    for (let i = 0; i <= word.length; i++) {
+        const l = word.slice(0, i), r = word.slice(i);
+        if (r) res.add(l + r.slice(1));                          // deletion
+        if (r.length > 1) res.add(l + r[1] + r[0] + r.slice(2)); // transposition
+        for (const c of ALPHABET) {
+            if (r) res.add(l + c + r.slice(1));                  // replacement
+            res.add(l + c + r);                                  // insertion
+        }
+    }
+    return res;
+}
+
+function rankOf(w) {
+    return FREQ_RANK.has(w) ? FREQ_RANK.get(w) : 1e9;
+}
+
+function suggestFor(word) {
+    const lower = word.toLowerCase();
+    if (suggestionCache.has(lower)) return suggestionCache.get(lower);
+
+    const e1 = edits1(lower);
+    let hits = [...e1].filter(w => DICT.has(w));
+
+    // No edit-distance-1 hits: go one edit deeper (bounded, for shorter words)
+    if (hits.length === 0 && lower.length <= 9) {
+        const seen = new Set();
+        outer:
+        for (const cand of e1) {
+            for (const w of edits1(cand)) {
+                if (!seen.has(w) && DICT.has(w)) {
+                    seen.add(w);
+                    if (seen.size >= 80) break outer;
+                }
+            }
+        }
+        hits = [...seen];
+    }
+
+    // Typos rarely change the first or last letter, so candidates keeping them rank higher
+    const score = w => rankOf(w)
+        + (w[0] !== lower[0] ? 2500 : 0)
+        + (w[w.length - 1] !== lower[lower.length - 1] ? 600 : 0);
+    const prefixLen = w => {
+        let i = 0;
+        while (i < w.length && i < lower.length && w[i] === lower[i]) i++;
+        return i;
+    };
+    hits.sort((a, b) =>
+        score(a) - score(b) ||
+        prefixLen(b) - prefixLen(a) ||
+        a.localeCompare(b)
+    );
+    const top = hits.slice(0, 3);
+    suggestionCache.set(lower, top);
+    return top;
+}
 
 /* =====================================================
    Rule data
@@ -452,7 +550,20 @@ const MISSPELLINGS = {
     suprise: 'surprise', teh: 'the', thier: 'their', tommorow: 'tomorrow', tommorrow: 'tomorrow',
     tounge: 'tongue', truely: 'truly', unforseen: 'unforeseen', unfortunatly: 'unfortunately',
     untill: 'until', vaccuum: 'vacuum', vegtable: 'vegetable', wich: 'which', wierd: 'weird',
-    whereever: 'wherever'
+    whereever: 'wherever',
+    // Classic keyboard slips
+    hte: 'the', adn: 'and', nad: 'and', tihs: 'this', thsi: 'this', jsut: 'just',
+    woudl: 'would', shoudl: 'should', coudl: 'could', taht: 'that', waht: 'what',
+    wih: 'with', wiht: 'with', abotu: 'about', beacuse: 'because', becasue: 'because',
+    yuo: 'you', yoru: 'your', esle: 'else',
+    // Missing apostrophes
+    dont: "don't", isnt: "isn't", arent: "aren't", wasnt: "wasn't", werent: "weren't",
+    doesnt: "doesn't", didnt: "didn't", couldnt: "couldn't", shouldnt: "shouldn't",
+    wouldnt: "wouldn't", havent: "haven't", hasnt: "hasn't", hadnt: "hadn't",
+    im: "I'm", ive: "I've", youre: "you're", theyre: "they're", youll: "you'll",
+    theyll: "they'll", youve: "you've", weve: "we've", hes: "he's", shes: "she's",
+    thats: "that's", theres: "there's", wheres: "where's", whos: "who's",
+    whats: "what's", heres: "here's"
 };
 
 const GRAMMAR_FIXES = [
@@ -555,6 +666,45 @@ function checkText(text) {
         }
         return null;
     });
+
+    // Full-dictionary spell check
+    if (DICT.size > 0) {
+        // Don't spell-check inside URLs and email addresses
+        const skipRanges = [];
+        runRegex([], text, /(?:https?:\/\/|www\.)\S+|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, m => {
+            skipRanges.push([m.index, m.index + m[0].length]);
+            return null;
+        });
+        const inSkip = (s, e) => skipRanges.some(r => s < r[1] && e > r[0]);
+
+        let budget = 30; // max fresh suggestion computations per pass
+        runRegex(found, text, /[A-Za-z]+(?:'[A-Za-z]+)*/g, m => {
+            const w = m[0];
+            const start = m.index, end = m.index + w.length;
+            if (w.length < 2 || w.length > 25) return null;
+            if (/^[A-Z]/.test(w)) return null;                    // possible proper noun / acronym / sentence case
+            if (/[a-z][A-Z]/.test(w)) return null;                // camelCase identifiers
+            if (start > 0 && /[\d'&-]/.test(text[start - 1])) return null; // "2nd", "AT&T", hyphen parts already split
+            if (end < text.length && /\d/.test(text[end])) return null;
+            if (inSkip(start, end)) return null;
+            if (MISSPELLINGS[w.toLowerCase()]) return null;       // handled above with a curated fix
+            if (isKnownWord(w)) return null;
+
+            let suggestions = suggestionCache.get(w.toLowerCase());
+            if (!suggestions && budget > 0) { budget--; suggestions = suggestFor(w); }
+            suggestions = suggestions || [];
+
+            return {
+                start, end, text: w, cat: 'correctness',
+                title: 'Possible spelling mistake',
+                msg: suggestions.length
+                    ? 'Did you mean ' + suggestions.map(s => `"${s}"`).join(', ') + '?'
+                    : `"${w}" isn't in the dictionary.`,
+                replacement: suggestions.length ? matchCase(w, suggestions[0]) : null,
+                ruleId: 'dict'
+            };
+        });
+    }
 
     // Grammar patterns
     for (const g of GRAMMAR_FIXES) {
@@ -843,11 +993,13 @@ function renderCards() {
             : `“${esc(iss.text.length > 70 ? iss.text.slice(0, 70) + '…' : iss.text)}”`;
         const applyBtn = iss.replacement !== null && iss.replacement !== undefined
             ? `<button class="btn primary" data-action="apply" data-id="${iss.id}">Apply</button>` : '';
+        const addBtn = iss.ruleId === 'dict'
+            ? `<button class="btn" data-action="addword" data-id="${iss.id}" title="Never flag this word again">+ Dictionary</button>` : '';
         return `<div class="card" data-cat="${iss.cat}" data-id="${iss.id}">
             <div class="cat-label">${CATS[iss.cat]}</div>
             <div class="title">${esc(iss.title)}</div>
             <div class="snippet">${snippet}<br>${esc(iss.msg)}</div>
-            <div class="actions">${applyBtn}<button class="btn" data-action="dismiss" data-id="${iss.id}">Dismiss</button></div>
+            <div class="actions">${applyBtn}<button class="btn" data-action="dismiss" data-id="${iss.id}">Dismiss</button>${addBtn}</div>
         </div>`;
     }).join('');
 }
@@ -932,6 +1084,11 @@ suggestionsEl.addEventListener('click', e => {
     if (btn) {
         if (btn.dataset.action === 'apply') applyFix(iss);
         else if (btn.dataset.action === 'dismiss') { dismissed.add(iss.sig); refresh(); }
+        else if (btn.dataset.action === 'addword') {
+            personalDict.add(iss.text.toLowerCase());
+            savePersonalDict();
+            refresh();
+        }
         return;
     }
     // Clicking the card selects the flagged text in the editor
